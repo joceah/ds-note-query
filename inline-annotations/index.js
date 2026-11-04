@@ -7,13 +7,17 @@
  */
 
 const ROUTE_PATH = '/dsh-inline-annotations/ask';
-const MAX_BODY_BYTES = 64 * 1024;
+const HEALTH_PATH = '/dsh-inline-annotations/health';
+const BUILD = 2;
+const MAX_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_SELECTION = 2000;
 const MAX_QUESTION = 2000;
 const MAX_CONTEXT = 4000;
 const MAX_TRANSCRIPT = 6000;
 const MAX_MESSAGE_TEXT = 1400;
 const MAX_TOKENS = 1400;
+const MAX_IMAGE_BYTES = 6 * 1024 * 1024;
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
 
 const SYSTEM_PROMPT = [
   '你是 DeepSeek Harness 对话页里的「划选批注助手」。',
@@ -26,11 +30,24 @@ const SYSTEM_PROMPT = [
   '3. 先用一句话给出结论或定义，再给 2 到 4 个要点；必要时补一个最小例子。默认不超过 250 字。',
   '4. 只依据提供的对话上下文和公认知识作答，不要编造对话中并不存在的结论；上下文不足以判断时，直接说明。',
   '5. 使用 Markdown：短段落、`-` 列表、行内 `代码`；不要使用一级标题，不要输出表格。',
+  '6. 如果用户附了图片（例如论文里的图表、公式截图），结合图片内容回答；看不清的地方直接说明，不要猜测。',
 ].join('\n');
 
 export const inject = ['webServer', 'llm', 'sessions'];
 
 export function apply(ctx) {
+  ctx.effect(() => ctx.webServer.register({
+    kind: 'exact',
+    path: HEALTH_PATH,
+    handler: (req, res) => {
+      if (req.method !== 'GET') {
+        sendJson(res, 405, { error: 'method-not-allowed' });
+        return;
+      }
+      sendJson(res, 200, { ok: true, plugin: 'inline-annotations', build: BUILD, images: true });
+    },
+  }));
+
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',
     path: ROUTE_PATH,
@@ -73,8 +90,14 @@ async function handleAsk(ctx, req, res) {
   const selectionContext = clip(asText(body && body.context), MAX_CONTEXT);
   const sessionId = asText(body && body.sessionId);
 
-  if (!selection) {
-    sendJson(res, 400, { error: 'empty-selection', message: '没有可提问的划选内容' });
+  const imageInput = parseImage(body && body.image);
+  if (imageInput && imageInput.error) {
+    sendJson(res, 400, { error: imageInput.error, message: imageInput.message });
+    return;
+  }
+
+  if (!selection && !imageInput) {
+    sendJson(res, 400, { error: 'empty-selection', message: '没有可提问的划选内容或图片' });
     return;
   }
 
@@ -85,11 +108,39 @@ async function handleAsk(ctx, req, res) {
     return;
   }
 
+  let imageRef;
+  if (imageInput) {
+    const attachments = ctx.get('attachments');
+    if (!attachments || typeof attachments.saveImage !== 'function') {
+      sendJson(res, 503, { error: 'no-attachments', message: '图片功能不可用：当前没有挂载附件服务' });
+      return;
+    }
+    const accepts = await modelAcceptsImages(ctx, target);
+    if (!accepts) {
+      sendJson(res, 409, {
+        error: 'no-vision',
+        message: '当前模型不支持图片输入，请在输入框的模型选择里换一个支持视觉的模型',
+      });
+      return;
+    }
+    try {
+      imageRef = await attachments.saveImage({
+        data: imageInput.data,
+        mediaType: imageInput.mediaType,
+        name: imageInput.name,
+      });
+    } catch (error) {
+      sendJson(res, 413, { error: 'image-rejected', message: `图片未能保存：${messageOf(error)}` });
+      return;
+    }
+  }
+
   const prompt = buildPrompt({
     selection,
     question,
     selectionContext,
     transcript: transcriptOf(session),
+    hasImage: !!imageRef,
   });
 
   res.writeHead(200, {
@@ -107,12 +158,15 @@ async function handleAsk(ctx, req, res) {
 
   let answer = '';
   try {
+    const content = [{ type: 'text', text: prompt }];
+    if (imageRef) content.push({ type: 'image', attachment: imageRef });
+
     const stream = ctx.llm.stream({
       provider: target.provider,
       model: target.model,
       reasoningEffort: target.reasoningEffort,
       system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
+      messages: [{ role: 'user', content }],
       temperature: 0.3,
       maxTokens: MAX_TOKENS,
       signal: controller.signal,
@@ -284,14 +338,61 @@ function textOf(message) {
   return parts.join('\n');
 }
 
-function buildPrompt({ selection, question, selectionContext, transcript }) {
+/**
+ * Decode one client image: base64 bytes plus the declared media type.
+ * Returns `{ data, mediaType, name }`, `{ error, message }`, or undefined.
+ */
+function parseImage(value) {
+  if (!value || typeof value !== 'object') return undefined;
+  const raw = asText(value.dataBase64);
+  if (!raw) return undefined;
+
+  const mediaType = asText(value.mediaType);
+  if (!IMAGE_TYPES.includes(mediaType)) {
+    return { error: 'bad-image-type', message: '不支持的图片格式（支持 PNG / JPEG / WebP / GIF）' };
+  }
+
+  const base64 = raw.includes(',') ? raw.slice(raw.indexOf(',') + 1) : raw;
+  let data;
+  try {
+    data = Buffer.from(base64, 'base64');
+  } catch {
+    return { error: 'bad-image', message: '图片数据无法解码' };
+  }
+  if (!data || data.length === 0) return { error: 'bad-image', message: '图片数据为空' };
+  if (data.length > MAX_IMAGE_BYTES) {
+    return { error: 'image-too-large', message: '图片太大（超过 6 MB），请压缩后再试' };
+  }
+  return { data, mediaType, name: clip(asText(value.name), 80) || undefined };
+}
+
+/** Ask the adapter whether this exact route accepts image input; unknown means "let the provider decide". */
+async function modelAcceptsImages(ctx, target) {
+  try {
+    const info = await ctx.llm.resolveModelInfo(target.provider, target.model);
+    const modalities = info && info.inputModalities;
+    if (!Array.isArray(modalities) || modalities.length === 0) return true;
+    return modalities.includes('image');
+  } catch {
+    return true;
+  }
+}
+
+function buildPrompt({ selection, question, selectionContext, transcript, hasImage }) {
   const parts = [];
   if (transcript) parts.push(`对话上下文（节选）：\n${transcript}`);
   if (selectionContext && selectionContext !== selection) {
     parts.push(`划选内容所在的段落：\n${selectionContext}`);
   }
-  parts.push(`划选内容：\n"""\n${selection}\n"""`);
-  parts.push(question ? `用户的问题：\n${question}` : '用户的问题：\n（没有额外问题，请直接解释这段内容）');
+  if (selection) parts.push(`划选内容：\n"""\n${selection}\n"""`);
+  if (hasImage) {
+    parts.push(selection
+      ? '另外，用户附上了一张图片（见后），请结合图片内容一起回答。'
+      : '用户没有划选文字，而是附上了一张图片（见后），请结合图片内容回答。');
+  }
+  parts.push(question
+    ? `用户的问题：\n${question}`
+    : (hasImage ? '用户的问题：\n（没有额外文字，请解释这张图片）' : '用户的问题：\n（没有额外问题，请直接解释这段内容）'));
   return parts.join('\n\n');
 }
 

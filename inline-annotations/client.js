@@ -6,10 +6,22 @@ window.__ModuleLoader__.load({
 
     const NS = 'inline-annotations';
     const STORAGE_KEY = 'dsh.inline-annotations.v1';
+    const PANEL_POS_KEY = 'dsh.inline-annotations.panel-pos';
     const ASK_ROUTE = '/dsh-inline-annotations/ask';
+    const HEALTH_ROUTE = '/dsh-inline-annotations/health';
     const MAX_SELECTION = 1500;
     const MAX_NOTES = 200;
     const ATTRIBUTE = 'data-dsh-inline-annotations';
+    const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
+
+    const TONES = [
+      { id: 'amber', dot: '#f59e0b' },
+      { id: 'blue', dot: '#3b82f6' },
+      { id: 'green', dot: '#10b981' },
+      { id: 'rose', dot: '#f43f5e' },
+      { id: 'violet', dot: '#8b5cf6' },
+      { id: 'slate', dot: '#64748b' },
+    ];
 
     const ZH = {
       'fab': '便签',
@@ -20,6 +32,14 @@ window.__ModuleLoader__.load({
       'toast.quoteFailed': '没能写入输入框，请先把光标放进输入框再试',
       'note.pdf': 'PDF 文档',
       'note.pdfPage': 'PDF 第 {n} 页',
+      'note.tone': '换配色',
+      'fab.image': '截图提问',
+      'fab.imageTitle': '粘贴截图提问',
+      'ask.image': '图片',
+      'ask.imageRemove': '移除',
+      'ask.imageHint': 'Ctrl+V 粘贴截图，或选择图片文件',
+      'image.failed': '图片读取失败，换一张试试',
+      'image.needsRestart': '图片提问需要重启一次 DSH 后可用',
       'panel.title': '划选批注',
       'panel.hint': '划选对话文字提问，回答收进便签',
       'panel.count': '{n} 条',
@@ -31,9 +51,14 @@ window.__ModuleLoader__.load({
       'note.copied': '已复制',
       'note.delete': '删除',
       'note.question': '提问',
+      'note.imageOnly': '图片提问',
+      'note.openImage': '查看大图',
       'note.interrupted': '回答被中断，已保留部分内容',
+      'panel.drag': '按住标题栏可拖动',
       'ask.title': '就划选内容提问',
       'ask.placeholder': '想问什么？留空则直接解释这段内容',
+      'ask.placeholderImage': '贴一张截图，问问这张图讲什么…',
+      'ask.imageLoading': '正在处理图片…',
       'ask.submit': '提问',
       'ask.cancel': '取消',
       'ask.stop': '停止',
@@ -54,6 +79,14 @@ window.__ModuleLoader__.load({
       'toast.quoteFailed': 'Could not write to the composer — click into it once and retry',
       'note.pdf': 'PDF document',
       'note.pdfPage': 'PDF page {n}',
+      'note.tone': 'Change color',
+      'fab.image': 'Ask with a screenshot',
+      'fab.imageTitle': 'Paste a screenshot to ask',
+      'ask.image': 'Image',
+      'ask.imageRemove': 'Remove',
+      'ask.imageHint': 'Paste a screenshot with Ctrl+V, or pick an image file',
+      'image.failed': 'Could not read that image',
+      'image.needsRestart': 'Image questions need one DSH restart',
       'panel.title': 'Selection notes',
       'panel.hint': 'Ask about selected text; answers stay in notes',
       'panel.count': '{n} notes',
@@ -65,9 +98,14 @@ window.__ModuleLoader__.load({
       'note.copied': 'Copied',
       'note.delete': 'Delete',
       'note.question': 'Question',
+      'note.imageOnly': 'Image question',
+      'note.openImage': 'Open image',
       'note.interrupted': 'Answer was stopped; partial text kept',
+      'panel.drag': 'Drag the header to move',
       'ask.title': 'Ask about the selection',
       'ask.placeholder': 'What do you want to ask? Leave empty to explain it.',
+      'ask.placeholderImage': 'Paste a screenshot and ask what it shows…',
+      'ask.imageLoading': 'Processing image…',
       'ask.submit': 'Ask',
       'ask.cancel': 'Cancel',
       'ask.stop': 'Stop',
@@ -126,6 +164,7 @@ window.__ModuleLoader__.load({
           sessionId: null,
           notes: [],
           panelOpen: false,
+          panelPos: loadPanelPos(),
           tip: null,
           ask: null,
           expanded: {},
@@ -133,6 +172,8 @@ window.__ModuleLoader__.load({
           confirmingClear: false,
           inputActions: null,
           toast: null,
+          hostBuild: 0,
+          dragging: false,
         };
         const subscribers = new Set();
 
@@ -196,6 +237,67 @@ window.__ModuleLoader__.load({
 
         function isNote(note) {
           return !!note && typeof note.id === 'string' && typeof note.text === 'string' && typeof note.answer === 'string';
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Panel position                                                    */
+        /* ---------------------------------------------------------------- */
+
+        function loadPanelPos() {
+          try {
+            const raw = window.localStorage.getItem(PANEL_POS_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (parsed && Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
+              return { x: parsed.x, y: parsed.y };
+            }
+          } catch {
+            // ignore a corrupt preference
+          }
+          return null;
+        }
+
+        function savePanelPos(position) {
+          try {
+            window.localStorage.setItem(PANEL_POS_KEY, JSON.stringify(position));
+          } catch {
+            // storage disabled: keep the position for this page only
+          }
+        }
+
+        function clampPanel(x, y, width, height) {
+          const maxX = Math.max(8, window.innerWidth - width - 8);
+          const maxY = Math.max(8, window.innerHeight - height - 8);
+          return {
+            x: Math.min(Math.max(8, Math.round(x)), maxX),
+            y: Math.min(Math.max(8, Math.round(y)), maxY),
+          };
+        }
+
+        function startPanelDrag(event, element) {
+          if (!element || event.button !== 0) return;
+          if (event.target && event.target.closest && event.target.closest('button, input, a')) return;
+          const rect = element.getBoundingClientRect();
+          const originX = rect.left;
+          const originY = rect.top;
+          const startX = event.clientX;
+          const startY = event.clientY;
+          set({ panelPos: { x: Math.round(originX), y: Math.round(originY) }, dragging: true });
+          event.preventDefault();
+
+          const move = (moveEvent) => {
+            set({ panelPos: clampPanel(originX + moveEvent.clientX - startX, originY + moveEvent.clientY - startY, rect.width, rect.height) });
+          };
+          const finish = () => {
+            window.removeEventListener('pointermove', move);
+            window.removeEventListener('pointerup', finish);
+            window.removeEventListener('pointercancel', finish);
+            set({ dragging: false });
+            if (state.panelPos) savePanelPos(state.panelPos);
+          };
+          window.addEventListener('pointermove', move);
+          window.addEventListener('pointerup', finish);
+          window.addEventListener('pointercancel', finish);
         }
 
         /* ---------------------------------------------------------------- */
@@ -332,17 +434,20 @@ window.__ModuleLoader__.load({
         /* Ask flow                                                          */
         /* ---------------------------------------------------------------- */
 
-        function openAsk(tip) {
-          if (askController) {
-            const previous = askController;
-            askController = null;
-            stoppedByUser = false;
-            try {
-              previous.abort();
-            } catch {
-              // already settled
-            }
+        function abortRunningAsk() {
+          if (!askController) return;
+          const previous = askController;
+          askController = null;
+          stoppedByUser = false;
+          try {
+            previous.abort();
+          } catch {
+            // already settled
           }
+        }
+
+        function openAsk(tip) {
+          abortRunningAsk();
           const width = 380;
           const left = Math.max(12, Math.min(tip.x - width / 2, window.innerWidth - width - 12));
           const position = tip.above
@@ -358,6 +463,9 @@ window.__ModuleLoader__.load({
               page: tip.page || '',
               question: '',
               answer: '',
+              image: null,
+              imageLoading: false,
+              imageError: null,
               phase: 'idle',
               error: null,
               savedId: null,
@@ -370,6 +478,33 @@ window.__ModuleLoader__.load({
           } catch {
             // no selection to clear
           }
+        }
+
+        /** A blank ask started from the screenshot button: no selection, image optional. */
+        function openBlankAsk() {
+          abortRunningAsk();
+          const width = 380;
+          const left = Math.max(12, Math.round((window.innerWidth - width) / 2));
+          const top = Math.max(72, Math.round(window.innerHeight * 0.22));
+          set({
+            tip: null,
+            ask: {
+              id: uid(),
+              text: '',
+              context: '',
+              source: 'conversation',
+              page: '',
+              question: '',
+              answer: '',
+              image: null,
+              imageLoading: false,
+              imageError: null,
+              phase: 'idle',
+              error: null,
+              savedId: null,
+              position: { left: `${left}px`, top: `${top}px` },
+            },
+          });
         }
 
         function closeAsk() {
@@ -421,6 +556,13 @@ window.__ModuleLoader__.load({
                 selection: base.text,
                 question,
                 context: base.context,
+                image: base.image
+                  ? {
+                    mediaType: base.image.mediaType,
+                    dataBase64: stripDataUrl(base.image.dataUrl),
+                    name: base.image.mediaType === 'image/png' ? 'screenshot.png' : 'screenshot.jpg',
+                  }
+                  : undefined,
               }),
             });
 
@@ -505,6 +647,7 @@ window.__ModuleLoader__.load({
             sessionId: state.sessionId,
             source: base.source || 'conversation',
             page: base.page || '',
+            thumb: base.image ? base.image.thumb : '',
           };
           const notes = [note].concat(state.notes).slice(0, MAX_NOTES);
           const expanded = Object.assign({}, state.expanded, { [note.id]: true });
@@ -525,6 +668,12 @@ window.__ModuleLoader__.load({
           if (expanded[id]) delete expanded[id];
           else expanded[id] = true;
           set({ expanded });
+        }
+
+        function setNoteTone(id, tone) {
+          const notes = state.notes.map((note) => (note.id === id ? Object.assign({}, note, { tone }) : note));
+          set({ notes });
+          persistNotes(state.sessionId, notes);
         }
 
         function deleteNote(id) {
@@ -562,6 +711,90 @@ window.__ModuleLoader__.load({
           } catch {
             // clipboard unavailable
           }
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Image attachments                                                 */
+        /* ---------------------------------------------------------------- */
+
+        function drawToDataUrl(image, maxDim, quality) {
+          const sourceWidth = image.naturalWidth || image.width || 1;
+          const sourceHeight = image.naturalHeight || image.height || 1;
+          const scale = Math.min(1, maxDim / Math.max(sourceWidth, sourceHeight));
+          const width = Math.max(1, Math.round(sourceWidth * scale));
+          const height = Math.max(1, Math.round(sourceHeight * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext('2d');
+          context.drawImage(image, 0, 0, width, height);
+          return { dataUrl: canvas.toDataURL('image/jpeg', quality), width, height };
+        }
+
+        /** Decode a pasted/picked file into one request image plus a small review thumbnail. */
+        function readImageFile(file) {
+          return new Promise((resolve, reject) => {
+            if (!file || !file.type || file.type.indexOf('image/') !== 0) {
+              reject(new Error('not-an-image'));
+              return;
+            }
+            if (file.size > MAX_UPLOAD_BYTES) {
+              reject(new Error('too-large'));
+              return;
+            }
+            const url = URL.createObjectURL(file);
+            const image = new Image();
+            image.onload = () => {
+              try {
+                const full = drawToDataUrl(image, 1600, 0.85);
+                const thumb = drawToDataUrl(image, 320, 0.55);
+                resolve({
+                  dataUrl: full.dataUrl,
+                  thumb: thumb.dataUrl,
+                  mediaType: 'image/jpeg',
+                  width: full.width,
+                  height: full.height,
+                });
+              } catch (error) {
+                reject(error);
+              } finally {
+                URL.revokeObjectURL(url);
+              }
+            };
+            image.onerror = () => {
+              URL.revokeObjectURL(url);
+              reject(new Error('decode-failed'));
+            };
+            image.src = url;
+          });
+        }
+
+        function stripDataUrl(dataUrl) {
+          const text = String(dataUrl || '');
+          const comma = text.indexOf(',');
+          return comma >= 0 ? text.slice(comma + 1) : text;
+        }
+
+        async function addAskImage(file) {
+          if (!state.ask) return;
+          if (state.hostBuild < 2) {
+            showToast(t('image.needsRestart'));
+            return;
+          }
+          set({ ask: Object.assign({}, state.ask, { imageLoading: true, imageError: null }) });
+          try {
+            const image = await readImageFile(file);
+            if (!state.ask) return;
+            set({ ask: Object.assign({}, state.ask, { image, imageLoading: false }) });
+          } catch {
+            if (!state.ask) return;
+            set({ ask: Object.assign({}, state.ask, { imageLoading: false, imageError: t('image.failed') }) });
+          }
+        }
+
+        function removeAskImage() {
+          if (!state.ask) return;
+          set({ ask: Object.assign({}, state.ask, { image: null, imageError: null }) });
         }
 
         function togglePanel(next) {
@@ -794,6 +1027,14 @@ window.__ModuleLoader__.load({
           );
         }
 
+        function IconImage() {
+          return h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, fill: 'none', 'aria-hidden': true, style: { display: 'block' } },
+            h('rect', { x: 3.5, y: 4.5, width: 17, height: 15, rx: 2.5, stroke: 'currentColor', strokeWidth: 1.6 }),
+            h('circle', { cx: 9, cy: 9.5, r: 1.6, fill: 'currentColor' }),
+            h('path', { d: 'M4.5 17.5 10 12l4 4 2.5-2.5 3 3', stroke: 'currentColor', strokeWidth: 1.6, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+          );
+        }
+
         /* ---------------------------------------------------------------- */
         /* Components                                                        */
         /* ---------------------------------------------------------------- */
@@ -802,6 +1043,7 @@ window.__ModuleLoader__.load({
           const [question, setQuestion] = React.useState(ask.question || '');
           const inputRef = React.useRef(null);
           const bodyRef = React.useRef(null);
+          const fileRef = React.useRef(null);
 
           React.useEffect(() => {
             if (inputRef.current) inputRef.current.focus();
@@ -827,6 +1069,30 @@ window.__ModuleLoader__.load({
               event.preventDefault();
               closeAsk();
             }
+          };
+
+          const onPaste = (event) => {
+            const items = event.clipboardData && event.clipboardData.items;
+            if (!items) return;
+            for (const item of items) {
+              if (item.type && item.type.indexOf('image/') === 0) {
+                const file = item.getAsFile();
+                if (file) {
+                  event.preventDefault();
+                  addAskImage(file);
+                  return;
+                }
+              }
+            }
+          };
+
+          const canImage = state.hostBuild >= 2;
+          const pickImage = () => {
+            if (!canImage) {
+              showToast(t('image.needsRestart'));
+              return;
+            }
+            if (fileRef.current) fileRef.current.click();
           };
 
           const head = h('div', { className: 'ia-ask-head' },
@@ -869,14 +1135,47 @@ window.__ModuleLoader__.load({
                 className: 'ia-ask-input',
                 rows: 2,
                 value: question,
-                placeholder: t('ask.placeholder'),
+                placeholder: ask.text ? t('ask.placeholder') : t('ask.placeholderImage'),
                 onChange: (event) => setQuestion(event.target.value),
                 onKeyDown,
+                onPaste,
               }),
+              h('div', { className: 'ia-ask-tools' },
+                h('button', {
+                  type: 'button',
+                  className: `ia-tool-btn${canImage ? '' : ' ia-tool-btn--off'}`,
+                  onClick: pickImage,
+                  title: canImage ? t('ask.imageHint') : t('image.needsRestart'),
+                  'aria-label': t('ask.image'),
+                },
+                  h(IconImage, null),
+                  h('span', null, t('ask.image')),
+                ),
+                h('span', { className: `ia-ask-hint${ask.imageError ? ' ia-ask-hint--error' : ''}` },
+                  ask.imageError
+                    ? ask.imageError
+                    : (ask.imageLoading ? t('ask.imageLoading') : t('ask.imageHint'))),
+              ),
               h('div', { className: 'ia-ask-actions' },
                 h('button', { type: 'button', className: 'ia-btn', onClick: closeAsk }, t('ask.cancel')),
-                h('button', { type: 'button', className: 'ia-btn ia-btn--primary', onClick: submit }, t('ask.submit')),
+                h('button', {
+                  type: 'button',
+                  className: 'ia-btn ia-btn--primary',
+                  onClick: submit,
+                  disabled: busy || (!ask.text && !ask.image && !question.trim()),
+                }, t('ask.submit')),
               ),
+              h('input', {
+                ref: fileRef,
+                type: 'file',
+                accept: 'image/*',
+                className: 'ia-file-input',
+                onChange: (event) => {
+                  const file = event.target.files && event.target.files[0];
+                  event.target.value = '';
+                  if (file) addAskImage(file);
+                },
+              }),
             );
           }
 
@@ -888,7 +1187,16 @@ window.__ModuleLoader__.load({
             [ATTRIBUTE]: 'ask',
           },
             head,
-            h('blockquote', { className: 'ia-ask-quote', title: ask.text }, ask.text),
+            ask.text ? h('blockquote', { className: 'ia-ask-quote', title: ask.text }, ask.text) : null,
+            ask.image
+              ? h('div', { className: 'ia-ask-image' },
+                h('img', { src: ask.image.thumb || ask.image.dataUrl, alt: '' }),
+                h('div', { className: 'ia-ask-image-meta' },
+                  h('span', null, `${ask.image.width}×${ask.image.height}`),
+                  h('button', { type: 'button', className: 'ia-link', onClick: removeAskImage }, t('ask.imageRemove')),
+                ),
+              )
+              : null,
             ask.phase === 'saved'
               ? h('div', { className: 'ia-ask-done' }, h('span', { className: 'ia-ask-done-icon' }, h(IconCheck, null)), t('ask.saved'))
               : null,
@@ -899,14 +1207,19 @@ window.__ModuleLoader__.load({
 
         function NoteCard({ note }) {
           const open = !!state.expanded[note.id];
-          return h('article', { className: `ia-note${open ? ' ia-note--open' : ''}` },
+          const tone = note.tone || 'amber';
+          return h('article', {
+            className: `ia-note${open ? ' ia-note--open' : ''}`,
+            'data-tone': tone,
+          },
             h('button', {
               type: 'button',
               className: 'ia-note-head',
               onClick: () => toggleNote(note.id),
               'aria-expanded': open,
             },
-              h('span', { className: 'ia-note-quote' }, note.text),
+              note.thumb ? h('img', { className: 'ia-note-head-thumb', src: note.thumb, alt: '' }) : null,
+              h('span', { className: 'ia-note-quote' }, note.text || (note.thumb ? t('note.imageOnly') : '')),
               note.source === 'document'
                 ? h('span', { className: 'ia-note-tag' }, note.page ? t('note.pdfPage').replace('{n}', note.page) : t('note.pdf'))
                 : null,
@@ -914,13 +1227,34 @@ window.__ModuleLoader__.load({
             ),
             open
               ? h('div', { className: 'ia-note-body' },
+                note.thumb
+                  ? h('button', {
+                    type: 'button',
+                    className: 'ia-note-thumb',
+                    title: t('note.openImage'),
+                    onClick: () => window.open(note.thumb, '_blank', 'noopener'),
+                  }, h('img', { src: note.thumb, alt: '' }))
+                  : null,
                 note.question ? h('div', { className: 'ia-note-q' }, h('span', { className: 'ia-note-q-label' }, t('note.question')), note.question) : null,
                 h('div', { className: 'ia-md' }, renderMarkdown(note.answer)),
                 note.interrupted ? h('div', { className: 'ia-note-stopped' }, t('note.interrupted')) : null,
                 h('div', { className: 'ia-note-foot' },
                   h('span', { className: 'ia-note-time' }, formatTime(note.createdAt)),
-                  h('button', { type: 'button', className: 'ia-link', onClick: () => copyNote(note) }, state.copiedId === note.id ? t('note.copied') : t('note.copy')),
-                  h('button', { type: 'button', className: 'ia-link ia-link--danger', onClick: () => deleteNote(note.id) }, t('note.delete')),
+                  h('div', { className: 'ia-tones' },
+                    TONES.map((entry) => h('button', {
+                      key: entry.id,
+                      type: 'button',
+                      className: `ia-tone${tone === entry.id ? ' ia-tone--active' : ''}`,
+                      style: { background: entry.dot },
+                      title: t('note.tone'),
+                      'aria-label': t('note.tone'),
+                      onClick: () => setNoteTone(note.id, entry.id),
+                    })),
+                  ),
+                  h('div', { className: 'ia-note-actions' },
+                    h('button', { type: 'button', className: 'ia-link', onClick: () => copyNote(note) }, state.copiedId === note.id ? t('note.copied') : t('note.copy')),
+                    h('button', { type: 'button', className: 'ia-link ia-link--danger', onClick: () => deleteNote(note.id) }, t('note.delete')),
+                  ),
                 ),
               )
               : null,
@@ -929,14 +1263,24 @@ window.__ModuleLoader__.load({
 
         function NotesPanel() {
           const count = state.notes.length;
+          const panelRef = React.useRef(null);
+          const style = state.panelPos
+            ? { left: `${state.panelPos.x}px`, top: `${state.panelPos.y}px`, right: 'auto', bottom: 'auto' }
+            : undefined;
           return h('section', {
+            ref: panelRef,
             className: 'ia-panel ia-surface',
+            style,
             role: 'dialog',
             'aria-label': t('panel.title'),
             id: 'ia-notes-panel',
             [ATTRIBUTE]: 'panel',
           },
-            h('header', { className: 'ia-panel-head' },
+            h('header', {
+              className: `ia-panel-head${state.dragging ? ' ia-panel-head--dragging' : ''}`,
+              onPointerDown: (event) => startPanelDrag(event, panelRef.current),
+              title: t('panel.drag'),
+            },
               h('span', { className: 'ia-panel-icon' }, h(IconNote, null)),
               h('div', { className: 'ia-panel-titles' },
                 h('div', { className: 'ia-panel-title' }, t('panel.title')),
@@ -980,6 +1324,14 @@ window.__ModuleLoader__.load({
               hideTip();
             };
             const onScroll = () => hideTip();
+            const onResize = () => {
+              hideTip();
+              if (!state.panelPos) return;
+              const element = document.querySelector('[data-dsh-inline-annotations="panel"]');
+              const width = element ? element.offsetWidth : 388;
+              const height = element ? element.offsetHeight : 320;
+              set({ panelPos: clampPanel(state.panelPos.x, state.panelPos.y, width, height) });
+            };
             const onKeyDown = (event) => {
               if (event.key !== 'Escape' || event.defaultPrevented) return;
               if (state.ask) {
@@ -997,7 +1349,7 @@ window.__ModuleLoader__.load({
             document.addEventListener('pointerdown', onPointerDown, true);
             document.addEventListener('keydown', onKeyDown);
             window.addEventListener('scroll', onScroll, true);
-            window.addEventListener('resize', onScroll);
+            window.addEventListener('resize', onResize);
 
             return () => {
               window.clearTimeout(timer);
@@ -1005,7 +1357,22 @@ window.__ModuleLoader__.load({
               document.removeEventListener('pointerdown', onPointerDown, true);
               document.removeEventListener('keydown', onKeyDown);
               window.removeEventListener('scroll', onScroll, true);
-              window.removeEventListener('resize', onScroll);
+              window.removeEventListener('resize', onResize);
+            };
+          }, []);
+
+          React.useEffect(() => {
+            let cancelled = false;
+            fetch(HEALTH_ROUTE, { credentials: 'same-origin' })
+              .then((response) => (response.ok ? response.json() : null))
+              .then((info) => {
+                if (!cancelled && info && info.ok) set({ hostBuild: Number(info.build) || 1 });
+              })
+              .catch(() => {
+                // an older Host half without the health route: image input stays hidden
+              });
+            return () => {
+              cancelled = true;
             };
           }, []);
 
@@ -1063,18 +1430,27 @@ window.__ModuleLoader__.load({
               )
               : null,
             state.ask ? h(AskCard, { key: state.ask.id || 'ask', ask: state.ask }) : null,
-            h('button', {
-              key: 'fab',
-              type: 'button',
-              className: `ia-fab${state.panelOpen ? ' ia-fab--active' : ''}`,
-              onClick: () => togglePanel(),
-              'aria-expanded': state.panelOpen,
-              'aria-controls': 'ia-notes-panel',
-              title: t('fab.title'),
-            },
-              h(IconNote, null),
-              h('span', { className: 'ia-fab-label' }, t('fab')),
-              state.notes.length > 0 ? h('span', { className: 'ia-fab-badge' }, String(state.notes.length)) : null,
+            h('div', { key: 'fab-group', className: 'ia-fab-group' },
+              h('button', {
+                type: 'button',
+                className: 'ia-fab ia-fab--icon',
+                onClick: openBlankAsk,
+                title: t('fab.imageTitle'),
+                'aria-label': t('fab.image'),
+              }, h(IconImage, null)),
+              h('button', {
+                key: 'fab',
+                type: 'button',
+                className: `ia-fab${state.panelOpen ? ' ia-fab--active' : ''}`,
+                onClick: () => togglePanel(),
+                'aria-expanded': state.panelOpen,
+                'aria-controls': 'ia-notes-panel',
+                title: t('fab.title'),
+              },
+                h(IconNote, null),
+                h('span', { className: 'ia-fab-label' }, t('fab')),
+                state.notes.length > 0 ? h('span', { className: 'ia-fab-badge' }, String(state.notes.length)) : null,
+              ),
             ),
             state.panelOpen ? h(NotesPanel, { key: 'panel' }) : null,
             state.toast
@@ -1142,10 +1518,16 @@ window.__ModuleLoader__.load({
   box-shadow: 0 18px 44px rgba(0, 0, 0, 0.18), 0 2px 8px rgba(0, 0, 0, 0.08);
   pointer-events: auto;
 }
-.ia-fab {
+.ia-fab-group {
   position: absolute;
   right: 20px;
   bottom: 104px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ia-fab {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1161,6 +1543,7 @@ window.__ModuleLoader__.load({
   font: inherit;
   transition: border-color .15s ease, color .15s ease, transform .15s ease;
 }
+.ia-fab--icon { width: 34px; padding: 0; justify-content: center; }
 .ia-fab:hover { border-color: var(--dsw-alias-border-l2); transform: translateY(-1px); }
 .ia-fab:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .ia-fab--active, .ia-fab--active:hover { border-color: var(--dsw-alias-brand-primary); color: var(--dsw-alias-brand-primary); }
@@ -1209,7 +1592,7 @@ window.__ModuleLoader__.load({
 .ia-tip-sep { width: 1px; height: 15px; margin: 0 1px; background: var(--dsw-alias-border-l1); }
 .ia-toast {
   position: absolute;
-  right: 118px;
+  right: 160px;
   bottom: 104px;
   height: 30px;
   padding: 0 12px;
@@ -1242,7 +1625,11 @@ window.__ModuleLoader__.load({
   gap: 9px;
   padding: 12px 10px 10px 14px;
   border-bottom: 1px solid var(--dsw-alias-border-l1);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
 }
+.ia-panel-head--dragging { cursor: grabbing; }
 .ia-panel-icon { color: var(--dsw-alias-brand-primary); display: inline-flex; }
 .ia-panel-titles { flex: 1; min-width: 0; }
 .ia-panel-title { font-size: 13px; font-weight: 600; }
@@ -1272,7 +1659,21 @@ window.__ModuleLoader__.load({
 }
 .ia-panel-empty { padding: 16px 12px 20px; color: var(--dsw-alias-label-secondary); text-align: center; font-size: 12.5px; line-height: 1.75; }
 .ia-panel-foot { display: flex; justify-content: flex-end; padding: 6px 14px 10px; }
-.ia-note { border: 1px solid var(--dsw-alias-border-l1); border-radius: 10px; background: var(--dsw-alias-bg-layer-1); overflow: hidden; }
+.ia-note {
+  --ia-accent: #f59e0b;
+  --ia-tint: rgba(245, 158, 11, 0.10);
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-left: 3px solid var(--ia-accent);
+  border-radius: 10px;
+  background-color: var(--dsw-alias-bg-layer-1);
+  background-image: linear-gradient(var(--ia-tint), var(--ia-tint));
+  overflow: hidden;
+}
+.ia-note[data-tone="blue"] { --ia-accent: #3b82f6; --ia-tint: rgba(59, 130, 246, 0.10); }
+.ia-note[data-tone="green"] { --ia-accent: #10b981; --ia-tint: rgba(16, 185, 129, 0.10); }
+.ia-note[data-tone="rose"] { --ia-accent: #f43f5e; --ia-tint: rgba(244, 63, 94, 0.10); }
+.ia-note[data-tone="violet"] { --ia-accent: #8b5cf6; --ia-tint: rgba(139, 92, 246, 0.10); }
+.ia-note[data-tone="slate"] { --ia-accent: #64748b; --ia-tint: rgba(100, 116, 139, 0.12); }
 .ia-note-head {
   display: flex;
   align-items: flex-start;
@@ -1323,7 +1724,38 @@ window.__ModuleLoader__.load({
   word-break: break-word;
 }
 .ia-note-q-label { color: var(--dsw-alias-label-secondary); margin-right: 6px; font-size: 11px; }
-.ia-note-foot { display: flex; align-items: center; gap: 12px; margin-top: 9px; }
+.ia-note-foot { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+.ia-note-head-thumb {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  object-fit: cover;
+}
+.ia-note-thumb {
+  display: block;
+  max-width: 100%;
+  margin: 2px 0 8px;
+  padding: 0;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: none;
+  cursor: zoom-in;
+  overflow: hidden;
+}
+.ia-note-thumb img { display: block; max-width: 100%; max-height: 220px; object-fit: contain; }
+.ia-note-actions { display: flex; align-items: center; gap: 10px; }
+.ia-tones { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.ia-tone {
+  width: 12px;
+  height: 12px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+}
+.ia-tone--active { box-shadow: 0 0 0 2px var(--dsw-alias-bg-overlay), 0 0 0 3px var(--dsw-alias-label-secondary); }
 .ia-note-time { font-size: 11px; color: var(--dsw-alias-label-secondary); }
 .ia-note-stopped { font-size: 11px; color: var(--dsw-alias-state-warn-primary); }
 .ia-link {
@@ -1368,6 +1800,42 @@ window.__ModuleLoader__.load({
   word-break: break-word;
 }
 .ia-ask-body { padding: 0 13px; overflow-y: auto; min-height: 0; }
+.ia-ask-image { display: flex; align-items: center; gap: 9px; margin: 2px 13px 8px; }
+.ia-ask-image img {
+  width: 58px;
+  height: 58px;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid var(--dsw-alias-border-l1);
+}
+.ia-ask-image-meta { display: flex; flex-direction: column; gap: 2px; font-size: 11.5px; color: var(--dsw-alias-label-secondary); }
+.ia-ask-tools { display: flex; align-items: center; gap: 8px; margin-top: 7px; min-width: 0; }
+.ia-tool-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  flex: 0 0 auto;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ia-tool-btn:hover { color: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); }
+.ia-tool-btn--off { opacity: 0.55; }
+.ia-ask-hint {
+  font-size: 11px;
+  color: var(--dsw-alias-label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ia-ask-hint--error { color: var(--dsw-alias-state-error-primary); }
+.ia-file-input { display: none; }
 .ia-ask-thinking { color: var(--dsw-alias-label-secondary); font-size: 12.5px; padding: 4px 0 10px; }
 .ia-ask-error { margin: 4px 0 10px; padding: 7px 9px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-state-error-primary); font-size: 12px; word-break: break-word; }
 .ia-caret { display: inline-block; width: 7px; height: 13px; margin-left: 1px; vertical-align: text-bottom; background: var(--dsw-alias-brand-primary); animation: ia-blink 1s steps(2, start) infinite; }
@@ -1408,6 +1876,8 @@ window.__ModuleLoader__.load({
 .ia-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .ia-btn--primary { background: var(--dsw-alias-brand-primary); border-color: var(--dsw-alias-brand-primary); color: #fff; }
 .ia-btn--primary:hover { opacity: .9; }
+.ia-btn:disabled { opacity: .45; cursor: not-allowed; }
+.ia-btn:disabled:hover { border-color: var(--dsw-alias-border-l1); }
 .ia-md { font-size: 12.8px; line-height: 1.68; padding: 2px 0 4px; }
 .ia-md p { margin: 0 0 6px; }
 .ia-md p:last-child { margin-bottom: 0; }
@@ -1432,7 +1902,8 @@ window.__ModuleLoader__.load({
 }
 .ia-md-pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 @media (max-width: 720px) {
-  .ia-fab { right: 12px; bottom: 92px; }
+  .ia-fab-group { right: 12px; bottom: 92px; }
+  .ia-fab-label { display: none; }
   .ia-panel { right: 12px; bottom: 140px; width: calc(100vw - 24px); max-height: calc(100vh - 180px); }
 }
 `;

@@ -207,6 +207,7 @@ window.__ModuleLoader__.load({
           hostBuild: 0,
           currentDoc: '',
           docFilter: 'all',
+          mathRev: 0,
         };
         const subscribers = new Set();
 
@@ -231,6 +232,85 @@ window.__ModuleLoader__.load({
         function useStore() {
           return React.useSyncExternalStore(subscribe, snapshot, snapshot);
         }
+
+        /* ---------------------------------------------------------------- */
+        /* Math (KaTeX, borrowed from the web shell)                         */
+        /* ---------------------------------------------------------------- */
+
+        let katex = null;
+        let katexLoading = null;
+
+        /** The shell ships KaTeX inside its hashed vendor chunk; find that chunk by URL. */
+        function vendorBundleUrl() {
+          const links = Array.from(document.querySelectorAll('link[rel="modulepreload"]'));
+          for (const link of links) {
+            const href = String(link.href || '');
+            if (/\/assets\/vendor-[^/]+\.js$/.test(href)) return href;
+          }
+          try {
+            const entries = performance.getEntriesByType('resource');
+            for (const entry of entries) {
+              const name = String(entry.name || '');
+              if (/\/assets\/vendor-[^/]+\.js$/.test(name)) return name;
+            }
+          } catch {
+            // performance API unavailable
+          }
+          return null;
+        }
+
+        function loadMath() {
+          if (katex) return Promise.resolve(katex);
+          if (katexLoading) return katexLoading;
+          katexLoading = (async () => {
+            const url = vendorBundleUrl();
+            if (!url) return null;
+            const mod = await import(/* @vite-ignore */ url);
+            for (const value of Object.values(mod)) {
+              if (value
+                && typeof value.renderToString === 'function'
+                && typeof value.__parse === 'function'
+                && typeof value.version === 'string') return value;
+            }
+            return null;
+          })()
+            .catch(() => null)
+            .then((found) => {
+              if (found) {
+                katex = found;
+                set({ mathRev: state.mathRev + 1 });
+              }
+              return found;
+            });
+          return katexLoading;
+        }
+
+        function mathNode(tex, display, key) {
+          if (katex) {
+            try {
+              const html = katex.renderToString(tex, {
+                displayMode: !!display,
+                throwOnError: false,
+                strict: 'ignore',
+              });
+              return h(display ? 'div' : 'span', {
+                key,
+                className: display ? 'ia-math ia-math--block' : 'ia-math',
+                dangerouslySetInnerHTML: { __html: html },
+              });
+            } catch {
+              // fall through to the plain-text form
+            }
+          }
+          return h('code', { key, className: 'ia-math-raw' }, display ? `$$${tex}$$` : `$${tex}$`);
+        }
+
+        /** `$5` / `$1,200.` is a price, not a formula. */
+        function looksLikeMoney(token) {
+          return /^\$[\d][\d,.]*[.,]?$/.test(token);
+        }
+
+        void loadMath();
 
         /* ---------------------------------------------------------------- */
         /* Persistence                                                       */
@@ -1060,7 +1140,7 @@ window.__ModuleLoader__.load({
           }
         }
 
-        function inline(text) {
+        function inlinePlain(text, prefix) {
           const nodes = [];
           const pattern = /(\*\*[^*]+\*\*|`[^`]+`|\*[^*\n]+\*)/g;
           let last = 0;
@@ -1069,7 +1149,7 @@ window.__ModuleLoader__.load({
           while ((match = pattern.exec(text)) !== null) {
             if (match.index > last) nodes.push(text.slice(last, match.index));
             const token = match[0];
-            const key = `n${index++}`;
+            const key = `${prefix}${index++}`;
             if (token.startsWith('**')) {
               nodes.push(h('strong', { key }, token.slice(2, -2)));
             } else if (token.startsWith('`')) {
@@ -1080,6 +1160,39 @@ window.__ModuleLoader__.load({
             last = match.index + token.length;
           }
           if (last < text.length) nodes.push(text.slice(last));
+          return nodes;
+        }
+
+        function inline(text) {
+          const nodes = [];
+          const pattern = /(\$\$[\s\S]+?\$\$|\$[^$\n]+\$|\\\([\s\S]*?\\\))/g;
+          let last = 0;
+          let index = 0;
+          let match;
+          while ((match = pattern.exec(text)) !== null) {
+            if (match.index > last) nodes.push(...inlinePlain(text.slice(last, match.index), `t${index}_`));
+            const token = match[0];
+            let body;
+            let display = false;
+            if (token.startsWith('$$')) {
+              body = token.slice(2, -2);
+              display = true;
+            } else if (token.startsWith('$')) {
+              body = token.slice(1, -1);
+            } else {
+              body = token.slice(2, -2);
+            }
+            const money = token.startsWith('$') && !token.startsWith('$$') && looksLikeMoney(token);
+            const padded = /^\s|\s$/.test(body);
+            if (money || padded || !body.trim()) {
+              nodes.push(...inlinePlain(token, `r${index}_`));
+            } else {
+              nodes.push(mathNode(body, display, `math${index}`));
+            }
+            index += 1;
+            last = match.index + token.length;
+          }
+          if (last < text.length) nodes.push(...inlinePlain(text.slice(last), `u${index}_`));
           return nodes.length ? nodes : [''];
         }
 
@@ -1089,6 +1202,7 @@ window.__ModuleLoader__.load({
           let paragraph = [];
           let list = null;
           let code = null;
+          let mathBlock = null;
           let key = 0;
 
           const flushParagraph = () => {
@@ -1107,10 +1221,16 @@ window.__ModuleLoader__.load({
             out.push(h('pre', { key: `c${key++}`, className: 'ia-md-pre' }, h('code', null, code.lines.join('\n'))));
             code = null;
           };
+          const flushMath = () => {
+            if (!mathBlock) return;
+            out.push(mathNode(mathBlock.join('\n'), true, `bm${key++}`));
+            mathBlock = null;
+          };
           const flushAll = () => {
             flushParagraph();
             flushList();
             flushCode();
+            flushMath();
           };
 
           for (const raw of lines) {
@@ -1120,9 +1240,29 @@ window.__ModuleLoader__.load({
               else code.lines.push(raw);
               continue;
             }
+            if (mathBlock) {
+              if (/\$\$\s*$/.test(line)) {
+                mathBlock.push(line.replace(/\$\$\s*$/, ''));
+                flushMath();
+              } else {
+                mathBlock.push(raw);
+              }
+              continue;
+            }
             if (/^\s*```/.test(line)) {
               flushAll();
               code = { lines: [] };
+              continue;
+            }
+            const displayMath = /^\s*\$\$(.*)$/.exec(line);
+            if (displayMath) {
+              flushAll();
+              const rest = displayMath[1];
+              if (/\$\$\s*$/.test(rest)) {
+                out.push(mathNode(rest.replace(/\$\$\s*$/, ''), true, `bm${key++}`));
+              } else {
+                mathBlock = rest.trim() ? [rest] : [];
+              }
               continue;
             }
             if (!line.trim()) {
@@ -2367,6 +2507,17 @@ window.__ModuleLoader__.load({
 .ia-md { font-size: 12.8px; line-height: 1.68; padding: 2px 0 4px; }
 .ia-md p { margin: 0 0 6px; }
 .ia-md p:last-child { margin-bottom: 0; }
+.ia-md .katex { font-size: 1.03em; }
+.ia-md .katex-display { margin: 0; }
+.ia-math--block { margin: 7px 0; padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
+.ia-math-raw {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.6px;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--dsw-alias-bg-layer-2);
+  word-break: break-all;
+}
 .ia-md-list { margin: 0 0 6px; padding-left: 18px; }
 .ia-md-list li { margin: 2px 0; }
 .ia-md-heading { font-weight: 600; margin: 7px 0 4px; }

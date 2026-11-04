@@ -2048,7 +2048,10 @@ window.__ModuleLoader__.load({
 .ia-icon-btn:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
 .ia-icon-btn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .ia-panel-list {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 9px 10px 10px;
   display: flex;
   flex-direction: column;
@@ -2110,7 +2113,14 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
   word-break: break-word;
 }
-.ia-note--open .ia-note-quote { -webkit-line-clamp: 3; color: var(--dsw-alias-label-primary); }
+.ia-note--open .ia-note-quote {
+  display: block;
+  -webkit-line-clamp: unset;
+  -webkit-box-orient: initial;
+  overflow: visible;
+  white-space: pre-wrap;
+  color: var(--dsw-alias-label-primary);
+}
 .ia-note-tag {
   flex: 0 0 auto;
   margin-top: 1px;

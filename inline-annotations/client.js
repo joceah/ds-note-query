@@ -6,7 +6,8 @@ window.__ModuleLoader__.load({
 
     const NS = 'inline-annotations';
     const STORAGE_KEY = 'dsh.inline-annotations.v1';
-    const PANEL_POS_KEY = 'dsh.inline-annotations.panel-pos';
+    const FAB_POS_KEY = 'dsh.inline-annotations.fab-pos';
+    const DOC_KEY = 'dsh.inline-annotations.docs';
     const ASK_ROUTE = '/dsh-inline-annotations/ask';
     const HEALTH_ROUTE = '/dsh-inline-annotations/health';
     const MAX_SELECTION = 1500;
@@ -44,6 +45,7 @@ window.__ModuleLoader__.load({
       'panel.hint': '划选对话文字提问，回答收进便签',
       'panel.count': '{n} 条',
       'panel.empty': '在对话里划选术语或段落，点「问 AI」，解释会收进这里，不会写进主对话。',
+      'panel.emptyFilter': '这个筛选下还没有便签。',
       'panel.clear': '清空全部',
       'panel.clearConfirm': '再点一次确认清空',
       'panel.close': '关闭便签',
@@ -54,7 +56,20 @@ window.__ModuleLoader__.load({
       'note.imageOnly': '图片提问',
       'note.openImage': '查看大图',
       'note.interrupted': '回答被中断，已保留部分内容',
-      'panel.drag': '按住标题栏可拖动',
+      'panel.filter.all': '全部文档',
+      'panel.filter.none': '未关联文档',
+      'doc.label': '文档',
+      'doc.placeholder': '关联文档（可选），如 论文A.pdf',
+      'fab.drag': '按住可拖动',
+      'ask.titleBlank': '提问',
+      'ask.screenshot': '截图',
+      'capture.title': '框选要提问的区域',
+      'capture.use': '使用这块',
+      'capture.retake': '重截',
+      'capture.cancel': '取消',
+      'capture.tooSmall': '选区太小，重新框选',
+      'capture.denied': '系统不允许页面截屏，请用系统截图（Win+Shift+S）后粘贴',
+      'capture.unsupported': '当前环境不支持内置截图，请用系统截图后粘贴',
       'ask.title': '就划选内容提问',
       'ask.placeholder': '想问什么？留空则直接解释这段内容',
       'ask.placeholderImage': '贴一张截图，问问这张图讲什么…',
@@ -91,6 +106,7 @@ window.__ModuleLoader__.load({
       'panel.hint': 'Ask about selected text; answers stay in notes',
       'panel.count': '{n} notes',
       'panel.empty': 'Select a term or passage in the conversation, choose Ask AI, and the answer lands here — never in the chat.',
+      'panel.emptyFilter': 'No notes under this filter.',
       'panel.clear': 'Clear all',
       'panel.clearConfirm': 'Click again to clear',
       'panel.close': 'Close notes',
@@ -101,7 +117,20 @@ window.__ModuleLoader__.load({
       'note.imageOnly': 'Image question',
       'note.openImage': 'Open image',
       'note.interrupted': 'Answer was stopped; partial text kept',
-      'panel.drag': 'Drag the header to move',
+      'panel.filter.all': 'All documents',
+      'panel.filter.none': 'No document',
+      'doc.label': 'Document',
+      'doc.placeholder': 'Related document (optional), e.g. paper-a.pdf',
+      'fab.drag': 'Drag to move',
+      'ask.titleBlank': 'Ask',
+      'ask.screenshot': 'Capture',
+      'capture.title': 'Drag a box around the area to ask about',
+      'capture.use': 'Use this area',
+      'capture.retake': 'Retake',
+      'capture.cancel': 'Cancel',
+      'capture.tooSmall': 'Selection is too small — drag a larger box',
+      'capture.denied': 'Screen capture is blocked here; use the system snipping tool and paste',
+      'capture.unsupported': 'Built-in capture is unavailable here; use the system snipping tool and paste',
       'ask.title': 'Ask about the selection',
       'ask.placeholder': 'What do you want to ask? Leave empty to explain it.',
       'ask.placeholderImage': 'Paste a screenshot and ask what it shows…',
@@ -164,16 +193,20 @@ window.__ModuleLoader__.load({
           sessionId: null,
           notes: [],
           panelOpen: false,
-          panelPos: loadPanelPos(),
+          fabPos: loadFabPos(),
+          fabSize: { width: 0, height: 0 },
+          fabDragging: false,
           tip: null,
           ask: null,
+          capture: null,
           expanded: {},
           copiedId: null,
           confirmingClear: false,
           inputActions: null,
           toast: null,
           hostBuild: 0,
-          dragging: false,
+          currentDoc: '',
+          docFilter: 'all',
         };
         const subscribers = new Set();
 
@@ -240,12 +273,12 @@ window.__ModuleLoader__.load({
         }
 
         /* ---------------------------------------------------------------- */
-        /* Panel position                                                    */
+        /* Floating button position, document context                        */
         /* ---------------------------------------------------------------- */
 
-        function loadPanelPos() {
+        function loadFabPos() {
           try {
-            const raw = window.localStorage.getItem(PANEL_POS_KEY);
+            const raw = window.localStorage.getItem(FAB_POS_KEY);
             if (!raw) return null;
             const parsed = JSON.parse(raw);
             if (parsed && Number.isFinite(parsed.x) && Number.isFinite(parsed.y)) {
@@ -257,15 +290,15 @@ window.__ModuleLoader__.load({
           return null;
         }
 
-        function savePanelPos(position) {
+        function saveFabPos(position) {
           try {
-            window.localStorage.setItem(PANEL_POS_KEY, JSON.stringify(position));
+            window.localStorage.setItem(FAB_POS_KEY, JSON.stringify(position));
           } catch {
             // storage disabled: keep the position for this page only
           }
         }
 
-        function clampPanel(x, y, width, height) {
+        function clampFab(x, y, width, height) {
           const maxX = Math.max(8, window.innerWidth - width - 8);
           const maxY = Math.max(8, window.innerHeight - height - 8);
           return {
@@ -274,30 +307,67 @@ window.__ModuleLoader__.load({
           };
         }
 
-        function startPanelDrag(event, element) {
+        let suppressFabClick = false;
+
+        /** Drag the floating button group itself; a small threshold keeps plain clicks working. */
+        function startFabDrag(event, element) {
           if (!element || event.button !== 0) return;
-          if (event.target && event.target.closest && event.target.closest('button, input, a')) return;
+          suppressFabClick = false;
           const rect = element.getBoundingClientRect();
-          const originX = rect.left;
-          const originY = rect.top;
           const startX = event.clientX;
           const startY = event.clientY;
-          set({ panelPos: { x: Math.round(originX), y: Math.round(originY) }, dragging: true });
-          event.preventDefault();
+          let moved = false;
 
           const move = (moveEvent) => {
-            set({ panelPos: clampPanel(originX + moveEvent.clientX - startX, originY + moveEvent.clientY - startY, rect.width, rect.height) });
+            const dx = moveEvent.clientX - startX;
+            const dy = moveEvent.clientY - startY;
+            if (!moved) {
+              if (Math.abs(dx) + Math.abs(dy) < 6) return;
+              moved = true;
+              set({ fabDragging: true, fabSize: { width: rect.width, height: rect.height } });
+            }
+            set({ fabPos: clampFab(rect.left + dx, rect.top + dy, rect.width, rect.height) });
           };
           const finish = () => {
             window.removeEventListener('pointermove', move);
             window.removeEventListener('pointerup', finish);
             window.removeEventListener('pointercancel', finish);
-            set({ dragging: false });
-            if (state.panelPos) savePanelPos(state.panelPos);
+            if (!moved) return;
+            set({ fabDragging: false });
+            saveFabPos(state.fabPos);
+            suppressFabClick = true;
           };
           window.addEventListener('pointermove', move);
           window.addEventListener('pointerup', finish);
           window.addEventListener('pointercancel', finish);
+        }
+
+        function readDocMap() {
+          try {
+            const parsed = JSON.parse(window.localStorage.getItem(DOC_KEY) || '{}');
+            return parsed && typeof parsed === 'object' ? parsed : {};
+          } catch {
+            return {};
+          }
+        }
+
+        function loadDoc(sessionId) {
+          if (!sessionId) return '';
+          const value = readDocMap()[sessionId];
+          return typeof value === 'string' ? value : '';
+        }
+
+        function saveDocFor(sessionId, doc) {
+          if (!sessionId) return;
+          const map = readDocMap();
+          const text = String(doc || '').trim();
+          if (text) map[sessionId] = text;
+          else delete map[sessionId];
+          try {
+            window.localStorage.setItem(DOC_KEY, JSON.stringify(map));
+          } catch {
+            // storage disabled
+          }
         }
 
         /* ---------------------------------------------------------------- */
@@ -311,7 +381,16 @@ window.__ModuleLoader__.load({
         function bindSession(sessionId) {
           if (state.sessionId === sessionId) return;
           closeAsk();
-          set({ sessionId: sessionId || null, notes: loadNotes(sessionId), tip: null, expanded: {}, panelOpen: false, confirmingClear: false });
+          set({
+            sessionId: sessionId || null,
+            notes: loadNotes(sessionId),
+            tip: null,
+            expanded: {},
+            panelOpen: false,
+            confirmingClear: false,
+            currentDoc: loadDoc(sessionId),
+            docFilter: 'all',
+          });
         }
 
         /* ---------------------------------------------------------------- */
@@ -388,44 +467,59 @@ window.__ModuleLoader__.load({
           if (state.tip) set({ tip: null });
         }
 
-        function evaluateSelection() {
-          const selection = window.getSelection();
-          if (!selection || selection.rangeCount === 0 || selection.isCollapsed) {
-            hideTip();
-            return;
-          }
-          const text = String(selection.toString()).replace(/\s+/g, ' ').trim();
-          if (!text || text.length > MAX_SELECTION) {
-            hideTip();
-            return;
-          }
-          const range = selection.getRangeAt(0);
-          const start = elementOf(range.startContainer);
-          const end = elementOf(range.endContainer);
-          if (!start || !end || insideOwnUi(start) || insideOwnUi(end) || insideEditable(start) || insideEditable(end)) {
-            hideTip();
-            return;
-          }
-          const rect = range.getBoundingClientRect();
-          if (!rect || (rect.width === 0 && rect.height === 0)) {
-            hideTip();
-            return;
-          }
-
-          const below = rect.bottom + 64 < window.innerHeight;
-          const centerX = rect.left + rect.width / 2;
-          const x = Math.max(80, Math.min(centerX, window.innerWidth - 80));
-          const y = below ? rect.bottom + 8 : rect.top - 8;
-          const documentContext = documentContextOf(start);
-          set({
-            tip: {
+        function readSelection() {
+          try {
+            const selection = window.getSelection();
+            if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+            const text = String(selection.toString()).replace(/\s+/g, ' ').trim();
+            if (!text || text.length > MAX_SELECTION) return null;
+            const range = selection.getRangeAt(0);
+            const start = elementOf(range.startContainer);
+            const end = elementOf(range.endContainer);
+            if (!start || !end || insideOwnUi(start) || insideOwnUi(end) || insideEditable(start) || insideEditable(end)) {
+              return null;
+            }
+            const rect = range.getBoundingClientRect();
+            if (!rect || (rect.width === 0 && rect.height === 0)) return null;
+            const documentContext = documentContextOf(start);
+            const below = rect.bottom + 64 < window.innerHeight;
+            return {
               text,
               context: documentContext ? documentContext.context : blockContextOf(range),
               source: documentContext ? 'document' : 'conversation',
               page: documentContext ? documentContext.page : '',
-              x,
-              y,
+              x: Math.max(80, Math.min(rect.left + rect.width / 2, window.innerWidth - 80)),
+              y: below ? rect.bottom + 8 : rect.top - 8,
               above: !below,
+            };
+          } catch {
+            return null;
+          }
+        }
+
+        function evaluateSelection() {
+          const info = readSelection();
+          if (!info) {
+            hideTip();
+            return;
+          }
+          // An open ask card is the live editor: a new selection feeds it instead of the tip.
+          if (state.ask && state.ask.phase === 'idle') {
+            if (state.ask.text !== info.text) {
+              set({ ask: Object.assign({}, state.ask, { text: info.text, context: info.context, source: info.source, page: info.page }) });
+            }
+            hideTip();
+            return;
+          }
+          set({
+            tip: {
+              text: info.text,
+              context: info.context,
+              source: info.source,
+              page: info.page,
+              x: info.x,
+              y: info.y,
+              above: info.above,
             },
           });
         }
@@ -455,12 +549,14 @@ window.__ModuleLoader__.load({
             : { left: `${left}px`, top: `${tip.y}px` };
           set({
             tip: null,
+            capture: null,
             ask: {
               id: uid(),
               text: tip.text,
               context: tip.context || '',
               source: tip.source || 'conversation',
               page: tip.page || '',
+              doc: state.currentDoc || '',
               question: '',
               answer: '',
               image: null,
@@ -480,20 +576,35 @@ window.__ModuleLoader__.load({
           }
         }
 
-        /** A blank ask started from the screenshot button: no selection, image optional. */
+        /** A blank ask started from the screenshot button: seeded with the live selection, image optional. */
         function openBlankAsk() {
           abortRunningAsk();
+          const selectionInfo = readSelection();
           const width = 380;
-          const left = Math.max(12, Math.round((window.innerWidth - width) / 2));
-          const top = Math.max(72, Math.round(window.innerHeight * 0.22));
+          const anchor = state.fabPos;
+          const size = state.fabSize;
+          let position;
+          if (anchor && size.width) {
+            const left = Math.max(12, Math.min(anchor.x, window.innerWidth - width - 12));
+            position = anchor.y < 320
+              ? { left: `${left}px`, top: `${anchor.y + size.height + 10}px` }
+              : { left: `${left}px`, bottom: `${Math.max(12, window.innerHeight - anchor.y + 10)}px` };
+          } else {
+            position = {
+              left: `${Math.max(12, Math.round((window.innerWidth - width) / 2))}px`,
+              top: `${Math.max(72, Math.round(window.innerHeight * 0.22))}px`,
+            };
+          }
           set({
             tip: null,
+            capture: null,
             ask: {
               id: uid(),
-              text: '',
-              context: '',
-              source: 'conversation',
-              page: '',
+              text: selectionInfo ? selectionInfo.text : '',
+              context: selectionInfo ? selectionInfo.context : '',
+              source: selectionInfo ? selectionInfo.source : 'conversation',
+              page: selectionInfo ? selectionInfo.page : '',
+              doc: state.currentDoc || '',
               question: '',
               answer: '',
               image: null,
@@ -502,7 +613,7 @@ window.__ModuleLoader__.load({
               phase: 'idle',
               error: null,
               savedId: null,
-              position: { left: `${left}px`, top: `${top}px` },
+              position,
             },
           });
         }
@@ -518,7 +629,7 @@ window.__ModuleLoader__.load({
               // already settled
             }
           }
-          if (state.ask) set({ ask: null });
+          if (state.ask || state.capture) set({ ask: null, capture: null });
         }
 
         function stopAsk() {
@@ -539,7 +650,12 @@ window.__ModuleLoader__.load({
           const controller = new AbortController();
           askController = controller;
           stoppedByUser = false;
-          set({ ask: Object.assign({}, current, { question, answer: '', phase: 'streaming', error: null, savedId: null }) });
+          const doc = String(current.doc || '').trim();
+          saveDocFor(state.sessionId, doc);
+          set({
+            currentDoc: doc,
+            ask: Object.assign({}, current, { doc, question, answer: '', phase: 'streaming', error: null, savedId: null }),
+          });
           runAsk(current, question, controller);
         }
 
@@ -555,7 +671,7 @@ window.__ModuleLoader__.load({
                 sessionId: state.sessionId,
                 selection: base.text,
                 question,
-                context: base.context,
+                context: [base.context, base.doc ? `【这段内容属于文档：${base.doc}】` : ''].filter(Boolean).join('\n'),
                 image: base.image
                   ? {
                     mediaType: base.image.mediaType,
@@ -647,6 +763,7 @@ window.__ModuleLoader__.load({
             sessionId: state.sessionId,
             source: base.source || 'conversation',
             page: base.page || '',
+            doc: base.doc || '',
             thumb: base.image ? base.image.thumb : '',
           };
           const notes = [note].concat(state.notes).slice(0, MAX_NOTES);
@@ -795,6 +912,84 @@ window.__ModuleLoader__.load({
         function removeAskImage() {
           if (!state.ask) return;
           set({ ask: Object.assign({}, state.ask, { image: null, imageError: null }) });
+        }
+
+        function imageFromDataUrl(dataUrl) {
+          return new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => {
+              try {
+                const full = drawToDataUrl(image, 1600, 0.85);
+                const thumb = drawToDataUrl(image, 320, 0.55);
+                resolve({
+                  dataUrl: full.dataUrl,
+                  thumb: thumb.dataUrl,
+                  mediaType: 'image/jpeg',
+                  width: full.width,
+                  height: full.height,
+                });
+              } catch (error) {
+                reject(error);
+              }
+            };
+            image.onerror = () => reject(new Error('decode-failed'));
+            image.src = dataUrl;
+          });
+        }
+
+        function applyCapturedImage(dataUrl) {
+          imageFromDataUrl(dataUrl)
+            .then((image) => {
+              if (!state.ask) return;
+              set({ ask: Object.assign({}, state.ask, { image }), capture: null });
+            })
+            .catch(() => {
+              set({ capture: null });
+              showToast(t('image.failed'));
+            });
+        }
+
+        /** One-shot screen capture through getDisplayMedia; the crop happens in CaptureOverlay. */
+        async function captureScreen() {
+          if (!state.ask) return;
+          const media = navigator.mediaDevices;
+          if (!media || typeof media.getDisplayMedia !== 'function') {
+            showToast(t('capture.unsupported'));
+            return;
+          }
+          let stream = null;
+          try {
+            stream = await media.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+            const track = stream.getVideoTracks()[0];
+            const video = document.createElement('video');
+            video.srcObject = stream;
+            video.muted = true;
+            await new Promise((resolve, reject) => {
+              video.onloadedmetadata = () => resolve();
+              video.onerror = () => reject(new Error('video-failed'));
+              const playing = video.play();
+              if (playing && typeof playing.catch === 'function') playing.catch(() => {});
+            });
+            await new Promise((resolve) => window.setTimeout(resolve, 150));
+            const canvas = document.createElement('canvas');
+            canvas.width = video.videoWidth || 1280;
+            canvas.height = video.videoHeight || 720;
+            canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+            const dataUrl = canvas.toDataURL('image/png');
+            if (track && typeof track.stop === 'function') track.stop();
+            set({ capture: { dataUrl } });
+          } catch {
+            if (stream) {
+              for (const track of stream.getTracks()) {
+                try {
+                  track.stop();
+                } catch {
+                  // already stopped
+                }
+              }
+            }
+            showToast(t('capture.denied'));
+          }
         }
 
         function togglePanel(next) {
@@ -1039,6 +1234,122 @@ window.__ModuleLoader__.load({
         /* Components                                                        */
         /* ---------------------------------------------------------------- */
 
+        function IconCrop() {
+          return h('svg', { viewBox: '0 0 24 24', width: 14, height: 14, fill: 'none', 'aria-hidden': true, style: { display: 'block' } },
+            h('path', { d: 'M7 3v4M3 7h4M17 3v4M21 7h-4M7 21v-4M3 17h4M17 21v-4M21 17h-4', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round' }),
+            h('rect', { x: 7, y: 7, width: 10, height: 10, rx: 1.5, stroke: 'currentColor', strokeWidth: 1.5, strokeDasharray: '2.5 2.5' }),
+          );
+        }
+
+        /* ---------------------------------------------------------------- */
+        /* Screenshot crop overlay                                           */
+        /* ---------------------------------------------------------------- */
+
+        function CaptureOverlay() {
+          const capture = state.capture;
+          const imgRef = React.useRef(null);
+          const dragRef = React.useRef(null);
+          const [rect, setRect] = React.useState(null);
+          const [error, setError] = React.useState(null);
+
+          if (!capture) return null;
+
+          const pointOf = (event) => {
+            const image = imgRef.current;
+            if (!image) return null;
+            const box = image.getBoundingClientRect();
+            return {
+              x: Math.max(0, Math.min(event.clientX - box.left, box.width)),
+              y: Math.max(0, Math.min(event.clientY - box.top, box.height)),
+            };
+          };
+
+          const onPointerDown = (event) => {
+            const point = pointOf(event);
+            if (!point) return;
+            dragRef.current = point;
+            setError(null);
+            setRect({ x: point.x, y: point.y, width: 1, height: 1 });
+            if (event.currentTarget.setPointerCapture) event.currentTarget.setPointerCapture(event.pointerId);
+            event.preventDefault();
+          };
+
+          const onPointerMove = (event) => {
+            const start = dragRef.current;
+            if (!start) return;
+            const point = pointOf(event);
+            if (!point) return;
+            setRect({
+              x: Math.min(start.x, point.x),
+              y: Math.min(start.y, point.y),
+              width: Math.abs(point.x - start.x),
+              height: Math.abs(point.y - start.y),
+            });
+          };
+
+          const onPointerUp = () => {
+            dragRef.current = null;
+          };
+
+          const apply = () => {
+            const image = imgRef.current;
+            if (!image || !rect) return;
+            if (rect.width < 8 || rect.height < 8) {
+              setError(t('capture.tooSmall'));
+              return;
+            }
+            const naturalWidth = image.naturalWidth || image.clientWidth;
+            const naturalHeight = image.naturalHeight || image.clientHeight;
+            const scaleX = naturalWidth / (image.clientWidth || 1);
+            const scaleY = naturalHeight / (image.clientHeight || 1);
+            const sx = Math.max(0, rect.x * scaleX);
+            const sy = Math.max(0, rect.y * scaleY);
+            const sw = Math.max(1, Math.min(naturalWidth - sx, rect.width * scaleX));
+            const sh = Math.max(1, Math.min(naturalHeight - sy, rect.height * scaleY));
+            const canvas = document.createElement('canvas');
+            canvas.width = Math.round(sw);
+            canvas.height = Math.round(sh);
+            canvas.getContext('2d').drawImage(image, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+            applyCapturedImage(canvas.toDataURL('image/png'));
+          };
+
+          return h('div', { className: 'ia-capture', [ATTRIBUTE]: 'capture' },
+            h('div', { className: 'ia-capture-box', role: 'dialog', 'aria-label': t('capture.title') },
+              h('div', { className: 'ia-capture-head' },
+                h('span', { className: 'ia-capture-title' }, t('capture.title')),
+                h('button', {
+                  type: 'button', className: 'ia-icon-btn', onClick: () => set({ capture: null }),
+                  title: t('capture.cancel'), 'aria-label': t('capture.cancel'),
+                }, h(IconClose, null)),
+              ),
+              h('div', {
+                className: 'ia-capture-stage',
+                onPointerDown,
+                onPointerMove,
+                onPointerUp,
+                onPointerCancel: onPointerUp,
+              },
+                h('img', { ref: imgRef, src: capture.dataUrl, alt: '', draggable: false }),
+                rect
+                  ? h('div', {
+                    className: 'ia-capture-rect',
+                    style: { left: `${rect.x}px`, top: `${rect.y}px`, width: `${rect.width}px`, height: `${rect.height}px` },
+                  })
+                  : null,
+              ),
+              h('div', { className: 'ia-capture-foot' },
+                error ? h('span', { className: 'ia-capture-error' }, error) : null,
+                h('button', { type: 'button', className: 'ia-btn', onClick: () => set({ capture: null }) }, t('capture.cancel')),
+                h('button', {
+                  type: 'button', className: 'ia-btn',
+                  onClick: () => { set({ capture: null }); captureScreen(); },
+                }, t('capture.retake')),
+                h('button', { type: 'button', className: 'ia-btn ia-btn--primary', onClick: apply }, t('capture.use')),
+              ),
+            ),
+          );
+        }
+
         function AskCard({ ask }) {
           const [question, setQuestion] = React.useState(ask.question || '');
           const inputRef = React.useRef(null);
@@ -1097,7 +1408,7 @@ window.__ModuleLoader__.load({
 
           const head = h('div', { className: 'ia-ask-head' },
             h('span', { className: 'ia-ask-icon' }, h(IconSpark, null)),
-            h('span', { className: 'ia-ask-title' }, t('ask.title')),
+            h('span', { className: 'ia-ask-title' }, t(ask.text ? 'ask.title' : 'ask.titleBlank')),
             h('button', {
               type: 'button', className: 'ia-icon-btn', onClick: closeAsk,
               title: t('ask.close'), 'aria-label': t('ask.close'),
@@ -1130,6 +1441,20 @@ window.__ModuleLoader__.load({
             );
           } else {
             footer = h('div', { className: 'ia-ask-compose' },
+              h('div', { className: 'ia-ask-doc' },
+                h('span', { className: 'ia-ask-doc-label' }, t('doc.label')),
+                h('input', {
+                  className: 'ia-ask-doc-input',
+                  value: ask.doc || '',
+                  placeholder: t('doc.placeholder'),
+                  onChange: (event) => {
+                    if (state.ask) set({ ask: Object.assign({}, state.ask, { doc: event.target.value }) });
+                  },
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter') event.preventDefault();
+                  },
+                }),
+              ),
               h('textarea', {
                 ref: inputRef,
                 className: 'ia-ask-input',
@@ -1141,6 +1466,16 @@ window.__ModuleLoader__.load({
                 onPaste,
               }),
               h('div', { className: 'ia-ask-tools' },
+                h('button', {
+                  type: 'button',
+                  className: 'ia-tool-btn',
+                  onClick: () => { captureScreen(); },
+                  title: t('ask.screenshot'),
+                  'aria-label': t('ask.screenshot'),
+                },
+                  h(IconCrop, null),
+                  h('span', null, t('ask.screenshot')),
+                ),
                 h('button', {
                   type: 'button',
                   className: `ia-tool-btn${canImage ? '' : ' ia-tool-btn--off'}`,
@@ -1223,6 +1558,9 @@ window.__ModuleLoader__.load({
               note.source === 'document'
                 ? h('span', { className: 'ia-note-tag' }, note.page ? t('note.pdfPage').replace('{n}', note.page) : t('note.pdf'))
                 : null,
+              note.doc
+                ? h('span', { className: 'ia-note-tag ia-note-tag--doc', title: note.doc }, note.doc)
+                : null,
               h('span', { className: `ia-note-chevron${open ? ' ia-note-chevron--open' : ''}` }, h(IconChevron, null)),
             ),
             open
@@ -1261,25 +1599,38 @@ window.__ModuleLoader__.load({
           );
         }
 
+        function panelAnchorStyle() {
+          const pos = state.fabPos;
+          const size = state.fabSize;
+          if (!pos || !size.width) return undefined;
+          const panelWidth = 388;
+          const right = Math.max(8, Math.min(window.innerWidth - (pos.x + size.width), window.innerWidth - panelWidth - 8));
+          const bottom = Math.max(8, window.innerHeight - pos.y + 10);
+          return { right: `${right}px`, bottom: `${bottom}px`, left: 'auto', top: 'auto' };
+        }
+
         function NotesPanel() {
           const count = state.notes.length;
-          const panelRef = React.useRef(null);
-          const style = state.panelPos
-            ? { left: `${state.panelPos.x}px`, top: `${state.panelPos.y}px`, right: 'auto', bottom: 'auto' }
-            : undefined;
+          const docs = [];
+          let hasUndocumented = false;
+          for (const note of state.notes) {
+            const doc = String(note.doc || '').trim();
+            if (!doc) hasUndocumented = true;
+            else if (docs.indexOf(doc) < 0) docs.push(doc);
+          }
+          const visible = state.docFilter === 'all'
+            ? state.notes
+            : state.notes.filter((note) => String(note.doc || '').trim() === state.docFilter);
           return h('section', {
-            ref: panelRef,
             className: 'ia-panel ia-surface',
-            style,
+            style: panelAnchorStyle(),
             role: 'dialog',
             'aria-label': t('panel.title'),
             id: 'ia-notes-panel',
             [ATTRIBUTE]: 'panel',
           },
             h('header', {
-              className: `ia-panel-head${state.dragging ? ' ia-panel-head--dragging' : ''}`,
-              onPointerDown: (event) => startPanelDrag(event, panelRef.current),
-              title: t('panel.drag'),
+              className: 'ia-panel-head',
             },
               h('span', { className: 'ia-panel-icon' }, h(IconNote, null)),
               h('div', { className: 'ia-panel-titles' },
@@ -1292,10 +1643,22 @@ window.__ModuleLoader__.load({
                 title: t('panel.close'), 'aria-label': t('panel.close'),
               }, h(IconClose, null)),
             ),
+            count > 0 && (docs.length > 0 || hasUndocumented)
+              ? h('div', { className: 'ia-panel-filter' },
+                h('select', {
+                  className: 'ia-select',
+                  value: state.docFilter,
+                  onChange: (event) => set({ docFilter: event.target.value }),
+                },
+                  h('option', { value: 'all' }, t('panel.filter.all')),
+                  docs.map((doc) => h('option', { key: doc, value: doc }, doc)),
+                  hasUndocumented ? h('option', { value: '' }, t('panel.filter.none')) : null,
+                ))
+              : null,
             h('div', { className: 'ia-panel-list' },
-              count === 0
-                ? h('div', { className: 'ia-panel-empty' }, t('panel.empty'))
-                : state.notes.map((note) => h(NoteCard, { key: note.id, note })),
+              visible.length === 0
+                ? h('div', { className: 'ia-panel-empty' }, count === 0 ? t('panel.empty') : t('panel.emptyFilter'))
+                : visible.map((note) => h(NoteCard, { key: note.id, note })),
             ),
             count > 0
               ? h('footer', { className: 'ia-panel-foot' },
@@ -1311,6 +1674,7 @@ window.__ModuleLoader__.load({
 
         function Overlay() {
           useStore();
+          const fabRef = React.useRef(null);
 
           React.useEffect(() => {
             let timer = 0;
@@ -1326,14 +1690,16 @@ window.__ModuleLoader__.load({
             const onScroll = () => hideTip();
             const onResize = () => {
               hideTip();
-              if (!state.panelPos) return;
-              const element = document.querySelector('[data-dsh-inline-annotations="panel"]');
-              const width = element ? element.offsetWidth : 388;
-              const height = element ? element.offsetHeight : 320;
-              set({ panelPos: clampPanel(state.panelPos.x, state.panelPos.y, width, height) });
+              if (!state.fabPos || !state.fabSize.width) return;
+              set({ fabPos: clampFab(state.fabPos.x, state.fabPos.y, state.fabSize.width, state.fabSize.height) });
             };
             const onKeyDown = (event) => {
               if (event.key !== 'Escape' || event.defaultPrevented) return;
+              if (state.capture) {
+                event.preventDefault();
+                set({ capture: null });
+                return;
+              }
               if (state.ask) {
                 event.preventDefault();
                 closeAsk();
@@ -1375,6 +1741,20 @@ window.__ModuleLoader__.load({
               cancelled = true;
             };
           }, []);
+
+          // Measure the floating buttons once they exist, so a restored position stays on screen
+          // and the panel can anchor to the group even before the first drag.
+          React.useEffect(() => {
+            const element = fabRef.current;
+            if (!element) return;
+            const rect = element.getBoundingClientRect();
+            const size = { width: rect.width, height: rect.height };
+            if (state.fabPos) {
+              set({ fabSize: size, fabPos: clampFab(state.fabPos.x, state.fabPos.y, size.width, size.height) });
+            } else {
+              set({ fabSize: size });
+            }
+          }, [state.sessionId]);
 
           React.useEffect(() => {
             let unsubscribe = null;
@@ -1430,10 +1810,26 @@ window.__ModuleLoader__.load({
               )
               : null,
             state.ask ? h(AskCard, { key: state.ask.id || 'ask', ask: state.ask }) : null,
-            h('div', { key: 'fab-group', className: 'ia-fab-group' },
+            h('div', {
+              key: 'fab-group',
+              ref: fabRef,
+              className: `ia-fab-group${state.fabDragging ? ' ia-fab-group--dragging' : ''}`,
+              style: state.fabPos
+                ? { left: `${state.fabPos.x}px`, top: `${state.fabPos.y}px`, right: 'auto', bottom: 'auto' }
+                : undefined,
+              onPointerDown: (event) => startFabDrag(event, fabRef.current),
+              onClickCapture: (event) => {
+                if (!suppressFabClick) return;
+                suppressFabClick = false;
+                event.stopPropagation();
+                event.preventDefault();
+              },
+              title: t('fab.drag'),
+            },
               h('button', {
                 type: 'button',
                 className: 'ia-fab ia-fab--icon',
+                onMouseDown: (event) => event.preventDefault(),
                 onClick: openBlankAsk,
                 title: t('fab.imageTitle'),
                 'aria-label': t('fab.image'),
@@ -1452,6 +1848,7 @@ window.__ModuleLoader__.load({
                 state.notes.length > 0 ? h('span', { className: 'ia-fab-badge' }, String(state.notes.length)) : null,
               ),
             ),
+            state.capture ? h(CaptureOverlay, { key: 'capture' }) : null,
             state.panelOpen ? h(NotesPanel, { key: 'panel' }) : null,
             state.toast
               ? h('div', { key: 'toast', className: 'ia-toast', role: 'status' }, state.toast.text)
@@ -1525,7 +1922,11 @@ window.__ModuleLoader__.load({
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
 }
+.ia-fab-group--dragging { cursor: grabbing; }
 .ia-fab {
   position: relative;
   display: inline-flex;
@@ -1625,11 +2026,7 @@ window.__ModuleLoader__.load({
   gap: 9px;
   padding: 12px 10px 10px 14px;
   border-bottom: 1px solid var(--dsw-alias-border-l1);
-  cursor: grab;
-  user-select: none;
-  touch-action: none;
 }
-.ia-panel-head--dragging { cursor: grabbing; }
 .ia-panel-icon { color: var(--dsw-alias-brand-primary); display: inline-flex; }
 .ia-panel-titles { flex: 1; min-width: 0; }
 .ia-panel-title { font-size: 13px; font-weight: 600; }
@@ -1657,6 +2054,19 @@ window.__ModuleLoader__.load({
   flex-direction: column;
   gap: 8px;
 }
+.ia-panel-filter { padding: 8px 10px 0; }
+.ia-select {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+}
+.ia-select:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
 .ia-panel-empty { padding: 16px 12px 20px; color: var(--dsw-alias-label-secondary); text-align: center; font-size: 12.5px; line-height: 1.75; }
 .ia-panel-foot { display: flex; justify-content: flex-end; padding: 6px 14px 10px; }
 .ia-note {
@@ -1710,6 +2120,11 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
   font-size: 10.5px;
   white-space: nowrap;
+}
+.ia-note-tag--doc {
+  max-width: 96px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ia-note-chevron { color: var(--dsw-alias-label-secondary); display: inline-flex; margin-top: 2px; }
 .ia-note-chevron--open { transform: rotate(90deg); color: var(--dsw-alias-brand-primary); }
@@ -1836,6 +2251,64 @@ window.__ModuleLoader__.load({
 }
 .ia-ask-hint--error { color: var(--dsw-alias-state-error-primary); }
 .ia-file-input { display: none; }
+.ia-ask-doc { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
+.ia-ask-doc-label { flex: 0 0 auto; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.ia-ask-doc-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 11.5px;
+}
+.ia-ask-doc-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
+.ia-ask-doc-input::placeholder { color: var(--dsw-alias-label-secondary); }
+.ia-capture {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  pointer-events: auto;
+}
+.ia-capture-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 14px;
+  background: var(--dsw-alias-bg-overlay);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+  max-width: 92vw;
+}
+.ia-capture-head { display: flex; align-items: center; gap: 8px; }
+.ia-capture-title { flex: 1; font-size: 12.5px; font-weight: 600; }
+.ia-capture-stage {
+  position: relative;
+  line-height: 0;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  overflow: hidden;
+  border-radius: 8px;
+}
+.ia-capture-stage img { display: block; max-width: 86vw; max-height: 68vh; user-select: none; }
+.ia-capture-rect {
+  position: absolute;
+  border: 1px solid var(--dsw-alias-brand-primary);
+  background: rgba(77, 107, 254, 0.18);
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+.ia-capture-foot { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.ia-capture-error { margin-right: auto; color: var(--dsw-alias-state-error-primary); font-size: 11.5px; }
 .ia-ask-thinking { color: var(--dsw-alias-label-secondary); font-size: 12.5px; padding: 4px 0 10px; }
 .ia-ask-error { margin: 4px 0 10px; padding: 7px 9px; border-radius: 8px; background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-state-error-primary); font-size: 12px; word-break: break-word; }
 .ia-caret { display: inline-block; width: 7px; height: 13px; margin-left: 1px; vertical-align: text-bottom; background: var(--dsw-alias-brand-primary); animation: ia-blink 1s steps(2, start) infinite; }

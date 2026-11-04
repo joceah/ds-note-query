@@ -60,6 +60,9 @@ window.__ModuleLoader__.load({
       'panel.filter.none': '未关联文档',
       'doc.label': '文档',
       'doc.placeholder': '关联文档（可选），如 论文A.pdf',
+      'doc.attached': '已关联：',
+      'doc.inherited': '已关联（沿用上次）：',
+      'doc.clear': '取消关联',
       'fab.drag': '按住可拖动',
       'ask.titleBlank': '提问',
       'ask.screenshot': '截图',
@@ -121,6 +124,9 @@ window.__ModuleLoader__.load({
       'panel.filter.none': 'No document',
       'doc.label': 'Document',
       'doc.placeholder': 'Related document (optional), e.g. paper-a.pdf',
+      'doc.attached': 'Attached: ',
+      'doc.inherited': 'Attached (kept from last time): ',
+      'doc.clear': 'Remove association',
       'fab.drag': 'Drag to move',
       'ask.titleBlank': 'Ask',
       'ask.screenshot': 'Capture',
@@ -637,6 +643,7 @@ window.__ModuleLoader__.load({
               source: tip.source || 'conversation',
               page: tip.page || '',
               doc: state.currentDoc || '',
+              docInherited: Boolean(String(state.currentDoc || '').trim()),
               question: '',
               answer: '',
               image: null,
@@ -685,6 +692,7 @@ window.__ModuleLoader__.load({
               source: selectionInfo ? selectionInfo.source : 'conversation',
               page: selectionInfo ? selectionInfo.page : '',
               doc: state.currentDoc || '',
+              docInherited: Boolean(String(state.currentDoc || '').trim()),
               question: '',
               answer: '',
               image: null,
@@ -1580,21 +1588,43 @@ window.__ModuleLoader__.load({
               h('button', { type: 'button', className: 'ia-btn', onClick: closeAsk }, t('ask.close')),
             );
           } else {
+            const docText = String(ask.doc || '').trim();
             footer = h('div', { className: 'ia-ask-compose' },
               h('div', { className: 'ia-ask-doc' },
                 h('span', { className: 'ia-ask-doc-label' }, t('doc.label')),
-                h('input', {
-                  className: 'ia-ask-doc-input',
-                  value: ask.doc || '',
-                  placeholder: t('doc.placeholder'),
-                  onChange: (event) => {
-                    if (state.ask) set({ ask: Object.assign({}, state.ask, { doc: event.target.value }) });
-                  },
-                  onKeyDown: (event) => {
-                    if (event.key === 'Enter') event.preventDefault();
-                  },
-                }),
+                h('div', { className: 'ia-ask-doc-field' },
+                  h('input', {
+                    className: 'ia-ask-doc-input',
+                    value: ask.doc || '',
+                    title: docText,
+                    placeholder: t('doc.placeholder'),
+                    onChange: (event) => {
+                      if (state.ask) set({ ask: Object.assign({}, state.ask, { doc: event.target.value, docInherited: false }) });
+                    },
+                    onKeyDown: (event) => {
+                      if (event.key === 'Enter') event.preventDefault();
+                    },
+                  }),
+                  docText
+                    ? h('button', {
+                      type: 'button',
+                      className: 'ia-ask-doc-clear',
+                      title: t('doc.clear'),
+                      'aria-label': t('doc.clear'),
+                      onClick: () => {
+                        if (state.ask) set({ ask: Object.assign({}, state.ask, { doc: '', docInherited: false }) });
+                      },
+                    }, h(IconClose, null))
+                    : null,
+                ),
               ),
+              docText
+                ? h('div', { className: 'ia-ask-doc-state', title: docText },
+                  h('span', { className: 'ia-ask-doc-tick' }, h(IconCheck, null)),
+                  h('span', { className: 'ia-ask-doc-state-text' },
+                    (ask.docInherited ? t('doc.inherited') : t('doc.attached')) + docText),
+                )
+                : null,
               h('textarea', {
                 ref: inputRef,
                 className: 'ia-ask-input',
@@ -2406,8 +2436,10 @@ window.__ModuleLoader__.load({
 .ia-file-input { display: none; }
 .ia-ask-doc { display: flex; align-items: center; gap: 7px; margin-bottom: 7px; }
 .ia-ask-doc-label { flex: 0 0 auto; font-size: 11px; color: var(--dsw-alias-label-secondary); }
+.ia-ask-doc-field { position: relative; flex: 1; min-width: 0; display: flex; }
 .ia-ask-doc-input {
   flex: 1;
+  width: 100%;
   min-width: 0;
   height: 26px;
   padding: 0 8px;
@@ -2420,6 +2452,43 @@ window.__ModuleLoader__.load({
 }
 .ia-ask-doc-input:focus { outline: none; border-color: var(--dsw-alias-brand-primary); }
 .ia-ask-doc-input::placeholder { color: var(--dsw-alias-label-secondary); }
+.ia-ask-doc-clear {
+  position: absolute;
+  right: 3px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  cursor: pointer;
+}
+.ia-ask-doc-clear:hover { background: var(--dsw-alias-bg-layer-2); color: var(--dsw-alias-label-primary); }
+.ia-ask-doc-field .ia-ask-doc-input { padding-right: 24px; }
+.ia-ask-doc-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: -3px 0 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--dsw-alias-label-secondary);
+}
+.ia-ask-doc-tick { display: inline-flex; margin-top: 2px; color: var(--dsw-alias-state-success-primary); }
+.ia-ask-doc-state-text {
+  min-width: 0;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  word-break: break-all;
+}
 .ia-capture {
   position: absolute;
   inset: 0;

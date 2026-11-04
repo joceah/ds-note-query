@@ -1,0 +1,8 @@
+# 打包产物与本地分发文件
+dist/
+*.zip
+
+# 依赖与系统杂项
+node_modules/
+.DS_Store
+Thumbs.db

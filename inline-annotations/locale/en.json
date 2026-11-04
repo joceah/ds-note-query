@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Selection Annotations",
+    "description": "Select a term or passage in the conversation, ask about it in place, and keep the answer as a collapsible note without adding to the chat history."
+  }
+}

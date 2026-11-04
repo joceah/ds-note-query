@@ -1,0 +1,3 @@
+- insert:
+    - id: inline-annotations
+      name: '@local/dsh-inline-annotations'
